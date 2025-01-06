@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import platform
+import pprint
 import re
 import sys
+import ast
+import operator
 import traceback
+import numpy as np
 from collections.abc import Sequence
 from copy import copy
 from functools import partial
@@ -39,6 +43,7 @@ from adetailer import (
     get_models,
     mediapipe_predict,
     ultralytics_predict,
+    metadata_predict,
 )
 from adetailer.args import (
     BBOX_SORTBY,
@@ -49,7 +54,7 @@ from adetailer.args import (
     InpaintBBoxMatchMode,
     SkipImg2ImgOrig,
 )
-from adetailer.common import PredictOutput, ensure_pil_image, safe_mkdir
+from adetailer.common import PredictOutput, ensure_pil_image, safe_mkdir, FaceDataList
 from adetailer.mask import (
     filter_by_ratio,
     filter_k_by,
@@ -82,6 +87,20 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
 
 PARAMS_TXT = "params.txt"
+
+# Supported query operators for safe evaluation
+OPERATORS = {
+    ast.Eq: operator.eq,
+    ast.NotEq: operator.ne,
+    ast.Lt: operator.lt,
+    ast.LtE: operator.le,
+    ast.Gt: operator.gt,
+    ast.GtE: operator.ge,
+    ast.And: all,
+    ast.Or: any,
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+}
 
 no_huggingface = getattr(cmd_opts, "ad_no_huggingface", False)
 adetailer_dir = Path(paths.models_path, "adetailer")
@@ -290,34 +309,50 @@ class AfterDetailerScript(scripts.Script):
         self,
         ad_prompt: str,
         all_prompts: list[str],
-        i: int,
+        i: int,        
         default: str,
         replacements: list[PromptSR],
     ) -> list[str]:
-        prompts = re.split(r"\s*\[SEP\]\s*", ad_prompt)
+        prompts = []
+        conditions = []
+        for part in re.split(r"\s*\[SEP(:.*?)?\]\s*", ad_prompt):            
+            # None means SEP without condition, so add empty string to conditions
+            if part is None:
+                conditions.append("1 == 1")
+            # If part starts with a colon, it is a condition
+            elif part.startswith(":"):
+                conditions.append(part[1:].strip())
+            # If part is empty, it is not needed
+            elif part == "":
+                continue
+            # Otherwise, it is a prompt
+            else:
+                prompts.append(part)
+                
         blank_replacement = self.prompt_blank_replacement(all_prompts, i, default)
         for n in range(len(prompts)):
             if not prompts[n]:
                 prompts[n] = blank_replacement
+                conditions[n] = "1 == 1"
             elif "[PROMPT]" in prompts[n]:
                 prompts[n] = prompts[n].replace("[PROMPT]", blank_replacement)
 
             for pair in replacements:
                 prompts[n] = prompts[n].replace(pair.s, pair.r)
-        return prompts
+        return prompts, conditions
 
     def get_prompt(self, p, args: ADetailerArgs) -> tuple[list[str], list[str]]:
         i = get_i(p)
         prompt_sr = p._ad_xyz_prompt_sr if hasattr(p, "_ad_xyz_prompt_sr") else []
 
-        prompt = self._get_prompt(
+        prompt, pos_conditions = self._get_prompt(
             ad_prompt=args.ad_prompt,
             all_prompts=p.all_prompts,
             i=i,
             default=p.prompt,
             replacements=prompt_sr,
         )
-        negative_prompt = self._get_prompt(
+        negative_prompt, neg_conditions = self._get_prompt(
             ad_prompt=args.ad_negative_prompt,
             all_prompts=p.all_negative_prompts,
             i=i,
@@ -325,7 +360,7 @@ class AfterDetailerScript(scripts.Script):
             replacements=prompt_sr,
         )
 
-        return prompt, negative_prompt
+        return prompt, negative_prompt, pos_conditions, neg_conditions
 
     def get_seed(self, p) -> tuple[int, int]:
         i = get_i(p)
@@ -604,12 +639,110 @@ class AfterDetailerScript(scripts.Script):
         sortby_idx = BBOX_SORTBY.index(sortby)
         return sort_bboxes(pred, sortby_idx)
 
-    def pred_preprocessing(self, p, pred: PredictOutput, args: ADetailerArgs):
+    # Function to calculate IoU
+    def calculate_iou(self, box1, box2):
+        x1, y1, x2, y2 = box1
+        x1_p, y1_p, x2_p, y2_p = box2
+        
+        # Calculate intersection
+        xi1 = max(x1, x1_p)
+        yi1 = max(y1, y1_p)
+        xi2 = min(x2, x2_p)
+        yi2 = min(y2, y2_p)
+        
+        inter_width = max(0, xi2 - xi1)
+        inter_height = max(0, yi2 - yi1)
+        intersection = inter_width * inter_height
+        
+        # Calculate union
+        box1_area = (x2 - x1) * (y2 - y1)
+        box2_area = (x2_p - x1_p) * (y2_p - y1_p)
+        union = box1_area + box2_area - intersection
+        
+        # Avoid division by zero
+        if union == 0:
+            return 0
+        
+        return intersection / union
+
+    # Matching and filtering
+    def match_and_filter(self, set1_bboxes, set2_faces, iou_threshold=0.3):
+        matched_data = []
+        for bbox in set1_bboxes:
+            best_match = None
+            best_iou = 0
+            for face_data in set2_faces:
+                # Convert region to bbox format
+                region = face_data.region
+                set2_bbox = [region.x, region.y, region.x + region.w, region.y + region.h]
+                iou = self.calculate_iou(bbox, set2_bbox)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_match = face_data
+            if best_match and best_iou >= iou_threshold:
+                matched_data.append(best_match)
+            else:
+                matched_data.append(None)
+        return matched_data    
+
+    def pred_preprocessing(self, p, pred: PredictOutput, mpred: FaceDataList, args: ADetailerArgs):
         pred = filter_by_ratio(
             pred, low=args.ad_mask_min_ratio, high=args.ad_mask_max_ratio
         )
         pred = filter_k_by(pred, k=args.ad_mask_k, by=args.ad_mask_filter_method)
         pred = self.sort_bboxes(pred)
+        # match bboxes from pred to mpred
+        meta = self.match_and_filter(pred.bboxes, mpred.faces)
+        
+        #recalculate max, min, etc. in meta
+        ages = [face.age for face in filter(None, meta)]
+        median_age = np.average(ages)
+        max_age = max(ages)
+        min_age = min(ages)
+        genders = [face.gender.Woman for face in filter(None, meta)]        
+        median_gender = np.average(genders)
+        max_gender = max(genders)
+        min_gender = min(genders)
+        total_faces = len(meta)
+        #     topbottom_rank: int = 0
+        # leftright_rank: int = 0
+        # area_rank: int = 0
+        
+        # calculate areas of faces from bboxes, and create a list of int ranks from 0 to total_faces
+        areas = [(bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) for bbox in pred.bboxes]
+        # sort areas and create a list of ranks
+        area_ranks = [0] * total_faces
+        for idx, area in enumerate(sorted(areas, reverse=True)):
+            area_ranks[areas.index(area)] = idx
+        # sort by y coordinate and create a list of ranks
+        topbottom_ranks = [0] * total_faces
+        for idx, bbox in enumerate(sorted(pred.bboxes, key=lambda x: x[1])):
+            topbottom_ranks[pred.bboxes.index(bbox)] = idx
+        # sort by x coordinate and create a list of ranks
+        leftright_ranks = [0] * total_faces
+        for idx, bbox in enumerate(sorted(pred.bboxes, key=lambda x: x[0])):
+            leftright_ranks[pred.bboxes.index(bbox)] = idx
+        
+        pprint.pp(pred.confs)
+        
+        # write back to meta
+        for idx, face in enumerate(meta):
+            if face is not None:
+                # set props
+                face.median_age=median_age
+                face.median_gender=median_gender
+                face.max_age=max_age
+                face.min_age=min_age
+                face.max_gender=max_gender
+                face.min_gender=min_gender
+                face.total_faces=total_faces
+                face.topbottom_rank=topbottom_ranks[idx]
+                face.leftright_rank=leftright_ranks[idx]
+                face.area_rank=area_ranks[idx]
+                face.ad_confidence = pred.confs[idx][0]
+                meta[idx] = face      
+        
+        # process masks
         masks = mask_preprocess(
             pred.masks,
             kernel=args.ad_dilate_erode,
@@ -621,7 +754,7 @@ class AfterDetailerScript(scripts.Script):
         if is_img2img_inpaint(p) and not is_inpaint_only_masked(p):
             image_mask = self.get_image_mask(p)
             masks = self.inpaint_mask_filter(image_mask, masks)
-        return masks
+        return masks, meta
 
     @staticmethod
     def i2i_prompts_replace(
@@ -633,6 +766,13 @@ class AfterDetailerScript(scripts.Script):
         negative_prompt = negative_prompts[i2]
         i2i.prompt = prompt
         i2i.negative_prompt = negative_prompt
+        
+    @staticmethod
+    def i2i_prompts_set(
+        i2i, pos: str, neg:str
+    ) -> None:        
+        i2i.prompt = pos
+        i2i.negative_prompt = neg
 
     @staticmethod
     def compare_prompt(extra_params: dict[str, Any], processed, n: int = 0):
@@ -801,6 +941,76 @@ class AfterDetailerScript(scripts.Script):
         extra_params = self.extra_params(arg_list)
         p.extra_generation_params.update(extra_params)
 
+    def _count_conditions(self, condition):
+        """Counts the number of subconditions in the condition string."""
+        return condition.count("and") + condition.count("or") + 1
+
+    def find_best_match_prompt(self, candidate_prompts, candidate_conditions, condition):        
+        # Find the best match
+        best_match = self._find_best_match(candidate_prompts, candidate_conditions, condition.__dict__)
+        print("Best match:", best_match)
+        return best_match
+    
+    def _safe_eval(self, node, context):
+        """Safely evaluates an AST node with the given context."""
+        if isinstance(node, ast.Expression):
+            return self._safe_eval(node.body, context)
+        elif isinstance(node, ast.BoolOp):
+            op = OPERATORS[type(node.op)]
+            return op(self._safe_eval(value, context) for value in node.values)
+        elif isinstance(node, ast.BinOp):  # Handle binary operations
+            left = self._safe_eval(node.left, context)
+            right = self._safe_eval(node.right, context)
+            op = OPERATORS[type(node.op)]
+            return op(left, right)
+        elif isinstance(node, ast.Compare):
+            left = self._safe_eval(node.left, context)
+            for op, comparator in zip(node.ops, node.comparators):
+                if not OPERATORS[type(op)](left, self._safe_eval(comparator, context)):
+                    return False
+            return True
+        elif isinstance(node, ast.Name):
+            # Check for custom functions
+            if node.id in context:
+                return context[node.id]
+            raise ValueError(f"Unknown variable or function: {node.id}")
+        elif isinstance(node, ast.Constant):
+            return node.value
+        elif isinstance(node, ast.Str):  # For Python < 3.8 compatibility
+            return node.s
+        else:
+            raise ValueError(f"Unsupported expression: {ast.dump(node)}")
+
+    def _parse_and_evaluate(self, condition, context):
+        """Parses a condition string into an AST and evaluates it safely."""
+        try:
+            node = ast.parse(condition, mode='eval')
+            return self._safe_eval(node, context)
+        except Exception as e:
+            raise ValueError(f"Error evaluating condition '{condition}': {e}")
+
+    def _find_best_match(self, values, conditions, context):
+        # Pair conditions with values
+        try:
+            condition_value_pairs = list(zip(conditions, values, strict=True))
+        except ValueError:
+            raise ValueError("Mismatched number of conditions and values")
+        
+        # Sort by specificity (descending) based on condition count
+        condition_value_pairs.sort(key=lambda pair: self._count_conditions(pair[0]), reverse=True)
+        print("Sorted condition-value pairs:")
+        pprint.pp(condition_value_pairs)
+        
+        # Evaluate conditions safely
+        for condition, value in condition_value_pairs:
+            print(f"[-] ADetailer: Evaluating condition '{condition}' with context {context}")
+            if self._parse_and_evaluate(condition, context):
+                print(f"[-] ADetailer: Condition '{condition}' matched, return")
+                return value
+        
+        return None  # No condition matched
+
+
     def _postprocess_image_inner(
         self, p, pp: PPImage, args: ADetailerArgs, *, n: int = 0
     ) -> bool:
@@ -817,7 +1027,10 @@ class AfterDetailerScript(scripts.Script):
         i = get_i(p)
 
         i2i = self.get_i2i_p(p, args, pp.image)
-        ad_prompts, ad_negatives = self.get_prompt(p, args)
+        ad_prompts, ad_negatives, ad_prompt_conditions, ad_neg_prompt_conditions = self.get_prompt(p, args)
+        
+        # print all prompts and conditions for debugging
+        print(f"[-] ADetailer: {ad_prompts} {ad_negatives} {ad_prompt_conditions} {ad_neg_prompt_conditions}")
 
         is_mediapipe = args.is_mediapipe()
 
@@ -840,8 +1053,14 @@ class AfterDetailerScript(scripts.Script):
                 f"[-] ADetailer: nothing detected on image {i + 1} with {ordinal(n + 1)} settings."
             )
             return False
+        else :
+            print(f"[-] ADetailer: {len(pred.bboxes)} faces detected on image via yolo")
+        
+        mpred = metadata_predict(pp.image)
 
-        masks = self.pred_preprocessing(p, pred, args)
+        print(f"[-] ADetailer: {len(mpred.faces)} faces detected on image via deepface metadata")
+        
+        masks, meta = self.pred_preprocessing(p, pred, mpred, args)
         shared.state.assign_current_image(pred.preview)
 
         self.save_image(
@@ -859,32 +1078,86 @@ class AfterDetailerScript(scripts.Script):
             print(f"mediapipe: {steps} detected.")
 
         p2 = copy(i2i)
+        
+        # determine query mode from number of non-empty strings in ad_prompt_conditions / ad_neg_prompt_conditions
+        querymode = len([x for x in ad_prompt_conditions if x]) > 0 or len([x for x in ad_neg_prompt_conditions if x]) > 0
+        
         for j in range(steps):
             p2.image_mask = masks[j]
             p2.init_images[0] = ensure_pil_image(p2.init_images[0], "RGB")
-            self.i2i_prompts_replace(p2, ad_prompts, ad_negatives, j)
+            if(querymode):
+                # QUERY MODE
+                
+                # AVAILABLE DATA
+                # ad_prompts: list of prompts from the ADetailer tab
+                # ad_negatives: list of negative prompts from the ADetailer tab
+                # ad_prompt_conditions: list of conditions for each prompt in ad_prompts
+                # ad_neg_prompt_conditions: list of conditions for each prompt in ad_negatives
+                # j: current mask index
+                # steps: total number of masks
+                # meta: metadata from the deepface prediction, same idx as masks
+                print(f"[-] ADetailer: Querying for mask {j + 1} of {steps}...")
 
-            if re.match(r"^\s*\[SKIP\]\s*$", p2.prompt):
-                continue
+                # If meta for current face is not defined / None, use default prompt
+                if meta[j] is None:
+                    best_prompt = ad_prompts[0]
+                    best_neg_prompt = ad_negatives[0]
+                else:                
+                    # Find best matching prompt for current mask
+                    best_prompt = self.find_best_match_prompt(ad_prompts, ad_prompt_conditions, meta[j])
+                    best_neg_prompt = self.find_best_match_prompt(ad_negatives, ad_neg_prompt_conditions, meta[j])
+                    print(f"[-] ADetailer: Best prompt: {best_prompt}, best negative {best_neg_prompt}")
+                    if best_prompt is None:
+                        continue
 
-            self.fix_p2(p, p2, pp, args, pred, j)
+                self.i2i_prompts_set(p2, best_prompt, best_neg_prompt)
+                
+                if re.match(r"^\s*\[SKIP\]\s*$", p2.prompt):
+                    continue
 
-            try:
-                processed = process_images(p2)
-            except NansException as e:
-                msg = f"[-] ADetailer: 'NansException' occurred with {ordinal(n + 1)} settings.\n{e}"
-                print(msg, file=sys.stderr)
-                continue
-            finally:
-                p2.close()
+                self.fix_p2(p, p2, pp, args, pred, j)
 
-            if not processed.images:
-                processed = None
-                break
+                try:
+                    processed = process_images(p2)
+                except NansException as e:
+                    msg = f"[-] ADetailer: 'NansException' occurred with {ordinal(n + 1)} settings.\n{e}"
+                    print(msg, file=sys.stderr)
+                    continue
+                finally:
+                    p2.close()
 
-            self.compare_prompt(p.extra_generation_params, processed, n=n)
-            p2 = copy(i2i)
-            p2.init_images = [processed.images[0]]
+                if not processed.images:
+                    processed = None
+                    break
+
+                self.compare_prompt(p.extra_generation_params, processed, n=n)
+                p2 = copy(i2i)
+                p2.init_images = [processed.images[0]]
+            else:
+                # Non-Query Mode
+                self.i2i_prompts_replace(p2, ad_prompts, ad_negatives, j)
+
+                if re.match(r"^\s*\[SKIP\]\s*$", p2.prompt):
+                    continue
+
+                self.fix_p2(p, p2, pp, args, pred, j)
+
+                try:
+                    processed = process_images(p2)
+                except NansException as e:
+                    msg = f"[-] ADetailer: 'NansException' occurred with {ordinal(n + 1)} settings.\n{e}"
+                    print(msg, file=sys.stderr)
+                    continue
+                finally:
+                    p2.close()
+
+                if not processed.images:
+                    processed = None
+                    break
+
+                self.compare_prompt(p.extra_generation_params, processed, n=n)
+                p2 = copy(i2i)
+                p2.init_images = [processed.images[0]]
 
         if processed is not None:
             pp.image = processed.images[0]

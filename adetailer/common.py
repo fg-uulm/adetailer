@@ -4,9 +4,9 @@ import os
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any, Generic, Optional, TypeVar
+from typing import Any, Generic, Optional, TypeVar, List, Dict, Tuple
 
 from huggingface_hub import hf_hub_download
 from PIL import Image, ImageDraw
@@ -24,6 +24,70 @@ class PredictOutput(Generic[T]):
     masks: list[Image.Image] = field(default_factory=list)
     confidences: list[float] = field(default_factory=list)
     preview: Optional[Image.Image] = None
+    confs: list[T] = field(default_factory=list)
+    
+@dataclass
+class Region:
+    x: int
+    y: int
+    w: int
+    h: int
+    left_eye: Tuple[int, int]
+    right_eye: Tuple[int, int]
+
+@dataclass
+class Gender:
+    Woman: float
+    Man: float
+
+@dataclass
+class Race:
+    asian: float
+    indian: float
+    black: float
+    white: float
+    middle_eastern: float
+    latino_hispanic: float
+
+@dataclass
+class Emotion:
+    angry: float
+    disgust: float
+    fear: float
+    happy: float
+    sad: float
+    surprise: float
+    neutral: float
+
+@dataclass
+class FaceData:
+    age: int
+    region: Region
+    gender: Gender
+    dominant_gender: str
+    race: Race
+    dominant_race: str
+    emotion: Emotion
+    dominant_emotion: str
+    median_age: float
+    median_gender: float
+    min_age: int
+    max_age: int
+    min_gender: float
+    max_gender: float
+    topbottom_rank: int = 0
+    leftright_rank: int = 0
+    area_rank: int = 0
+    total_faces: int = 0    
+    face_confidence: float = 0.0
+    ad_confidence: float = 0.0
+    
+    def __iter__(self):
+        return iter(asdict(self).values())
+
+@dataclass
+class FaceDataList:
+    faces: List[FaceData] = field(default_factory=list)
 
 
 def hf_download(file: str, repo_id: str = REPO_ID, check_remote: bool = True) -> str:
