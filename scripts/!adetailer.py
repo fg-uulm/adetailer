@@ -723,8 +723,6 @@ class AfterDetailerScript(scripts.Script):
         for idx, bbox in enumerate(sorted(pred.bboxes, key=lambda x: x[0])):
             leftright_ranks[pred.bboxes.index(bbox)] = idx
         
-        pprint.pp(pred.confs)
-        
         # write back to meta
         for idx, face in enumerate(meta):
             if face is not None:
@@ -739,7 +737,7 @@ class AfterDetailerScript(scripts.Script):
                 face.topbottom_rank=topbottom_ranks[idx]
                 face.leftright_rank=leftright_ranks[idx]
                 face.area_rank=area_ranks[idx]
-                face.ad_confidence = pred.confs[idx][0]
+                face.ad_confidence = pred.confidences[idx][0]
                 meta[idx] = face      
         
         # process masks

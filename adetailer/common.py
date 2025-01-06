@@ -24,7 +24,6 @@ class PredictOutput(Generic[T]):
     masks: list[Image.Image] = field(default_factory=list)
     confidences: list[float] = field(default_factory=list)
     preview: Optional[Image.Image] = None
-    confs: list[T] = field(default_factory=list)
     
 @dataclass
 class Region:
