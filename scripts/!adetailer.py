@@ -694,51 +694,53 @@ class AfterDetailerScript(scripts.Script):
         # match bboxes from pred to mpred
         meta = self.match_and_filter(pred.bboxes, mpred.faces)
         
-        #recalculate max, min, etc. in meta
-        ages = [face.age for face in filter(None, meta)]
-        median_age = np.average(ages)
-        max_age = max(ages)
-        min_age = min(ages)
-        genders = [face.gender.Woman for face in filter(None, meta)]        
-        median_gender = np.average(genders)
-        max_gender = max(genders)
-        min_gender = min(genders)
-        total_faces = len(meta)
-        #     topbottom_rank: int = 0
-        # leftright_rank: int = 0
-        # area_rank: int = 0
-        
-        # calculate areas of faces from bboxes, and create a list of int ranks from 0 to total_faces
-        areas = [(bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) for bbox in pred.bboxes]
-        # sort areas and create a list of ranks
-        area_ranks = [0] * total_faces
-        for idx, area in enumerate(sorted(areas, reverse=True)):
-            area_ranks[areas.index(area)] = idx
-        # sort by y coordinate and create a list of ranks
-        topbottom_ranks = [0] * total_faces
-        for idx, bbox in enumerate(sorted(pred.bboxes, key=lambda x: x[1])):
-            topbottom_ranks[pred.bboxes.index(bbox)] = idx
-        # sort by x coordinate and create a list of ranks
-        leftright_ranks = [0] * total_faces
-        for idx, bbox in enumerate(sorted(pred.bboxes, key=lambda x: x[0])):
-            leftright_ranks[pred.bboxes.index(bbox)] = idx
-        
-        # write back to meta
-        for idx, face in enumerate(meta):
-            if face is not None:
-                # set props
-                face.median_age=median_age
-                face.median_gender=median_gender
-                face.max_age=max_age
-                face.min_age=min_age
-                face.max_gender=max_gender
-                face.min_gender=min_gender
-                face.total_faces=total_faces
-                face.topbottom_rank=topbottom_ranks[idx]
-                face.leftright_rank=leftright_ranks[idx]
-                face.area_rank=area_ranks[idx]
-                face.ad_confidence = pred.confidences[idx][0]
-                meta[idx] = face      
+        # check if meta results do not solely consist of 'None' values, if no do additional data processing
+        if not all([x is None for x in meta]):            
+            #recalculate max, min, etc. in meta
+            ages = [face.age for face in filter(None, meta)]
+            median_age = np.average(ages)
+            max_age = max(ages)
+            min_age = min(ages)
+            genders = [face.gender.Woman for face in filter(None, meta)]        
+            median_gender = np.average(genders)
+            max_gender = max(genders)
+            min_gender = min(genders)
+            total_faces = len(meta)
+            #     topbottom_rank: int = 0
+            # leftright_rank: int = 0
+            # area_rank: int = 0
+            
+            # calculate areas of faces from bboxes, and create a list of int ranks from 0 to total_faces
+            areas = [(bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) for bbox in pred.bboxes]
+            # sort areas and create a list of ranks
+            area_ranks = [0] * total_faces
+            for idx, area in enumerate(sorted(areas, reverse=True)):
+                area_ranks[areas.index(area)] = idx
+            # sort by y coordinate and create a list of ranks
+            topbottom_ranks = [0] * total_faces
+            for idx, bbox in enumerate(sorted(pred.bboxes, key=lambda x: x[1])):
+                topbottom_ranks[pred.bboxes.index(bbox)] = idx
+            # sort by x coordinate and create a list of ranks
+            leftright_ranks = [0] * total_faces
+            for idx, bbox in enumerate(sorted(pred.bboxes, key=lambda x: x[0])):
+                leftright_ranks[pred.bboxes.index(bbox)] = idx
+            
+            # write back to meta
+            for idx, face in enumerate(meta):
+                if face is not None:
+                    # set props
+                    face.median_age=median_age
+                    face.median_gender=median_gender
+                    face.max_age=max_age
+                    face.min_age=min_age
+                    face.max_gender=max_gender
+                    face.min_gender=min_gender
+                    face.total_faces=total_faces
+                    face.topbottom_rank=topbottom_ranks[idx]
+                    face.leftright_rank=leftright_ranks[idx]
+                    face.area_rank=area_ranks[idx]
+                    face.ad_confidence = pred.confidences[idx][0]
+                    meta[idx] = face      
         
         # process masks
         masks = mask_preprocess(
