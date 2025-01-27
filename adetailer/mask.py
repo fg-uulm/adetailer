@@ -204,6 +204,8 @@ def sort_bboxes(
     idx = sorted(range(items), key=lambda i: key(pred.bboxes[i]))
     pred.bboxes = [pred.bboxes[i] for i in idx]
     pred.masks = [pred.masks[i] for i in idx]
+    pred.classnames = [pred.classnames[i] for i in idx]
+    pred.confidences = [pred.confidences[i] for i in idx]
     return pred
 
 

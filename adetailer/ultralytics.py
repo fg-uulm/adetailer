@@ -34,10 +34,14 @@ def ultralytics_predict(
     if bboxes.size == 0:
         return PredictOutput()
     
-    bboxes = bboxes.tolist()    
+    bboxes = bboxes.tolist()
 
     confs = pred[0].boxes.data[:, 4:6].cpu().numpy().tolist()
-    pprint.pp(confs)
+
+    # get classes for results from segmentation
+    classes = pred[0].boxes.cls.cpu().numpy().astype(int).tolist()
+    # get class names from model as second list via cls_name = model.names[cls_id]  
+    cls_names = [model.names[cls_id] for cls_id in classes]   
 
     if pred[0].masks is None:
         masks = create_mask_from_bbox(bboxes, image.size)
@@ -50,7 +54,7 @@ def ultralytics_predict(
     preview = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
     preview = Image.fromarray(preview)
 
-    return PredictOutput(bboxes=bboxes, masks=masks, preview=preview, confs=confs)
+    return PredictOutput(bboxes=bboxes, masks=masks, preview=preview, confidences=confidences, classnames=cls_names)
 
 def metadata_predict(
     image: Image.Image,

@@ -23,6 +23,7 @@ class PredictOutput(Generic[T]):
     bboxes: list[list[T]] = field(default_factory=list)
     masks: list[Image.Image] = field(default_factory=list)
     confidences: list[float] = field(default_factory=list)
+    classnames: list[str] = field(default_factory=list)
     preview: Optional[Image.Image] = None
     
 @dataclass
@@ -60,26 +61,27 @@ class Emotion:
 
 @dataclass
 class FaceData:
-    age: int
-    region: Region
-    gender: Gender
-    dominant_gender: str
-    race: Race
-    dominant_race: str
-    emotion: Emotion
-    dominant_emotion: str
-    median_age: float
-    median_gender: float
-    min_age: int
-    max_age: int
-    min_gender: float
-    max_gender: float
+    age: int = 0
+    region: Region = None
+    gender: Gender = None
+    dominant_gender: str = ""
+    race: Race = None
+    dominant_race: str = ""
+    emotion: Emotion = None
+    dominant_emotion: str = ""
+    median_age: float = 0.0
+    median_gender: float = 0.0
+    min_age: int = 0
+    max_age: int = 0
+    min_gender: float = 0.0
+    max_gender: float = 0.0
     topbottom_rank: int = 0
     leftright_rank: int = 0
     area_rank: int = 0
     total_faces: int = 0    
     face_confidence: float = 0.0
     ad_confidence: float = 0.0
+    ad_classname: str = ""
     
     def __iter__(self):
         return iter(asdict(self).values())

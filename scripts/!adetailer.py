@@ -54,7 +54,7 @@ from adetailer.args import (
     InpaintBBoxMatchMode,
     SkipImg2ImgOrig,
 )
-from adetailer.common import PredictOutput, ensure_pil_image, safe_mkdir, FaceDataList
+from adetailer.common import PredictOutput, ensure_pil_image, safe_mkdir, FaceDataList, FaceData, Region
 from adetailer.mask import (
     filter_by_ratio,
     filter_k_by,
@@ -686,61 +686,86 @@ class AfterDetailerScript(scripts.Script):
         return matched_data    
 
     def pred_preprocessing(self, p, pred: PredictOutput, mpred: FaceDataList, args: ADetailerArgs):
+        #pprint.pp(pred)
         pred = filter_by_ratio(
             pred, low=args.ad_mask_min_ratio, high=args.ad_mask_max_ratio
         )
         pred = filter_k_by(pred, k=args.ad_mask_k, by=args.ad_mask_filter_method)
         pred = self.sort_bboxes(pred)
-        # match bboxes from pred to mpred
-        meta = self.match_and_filter(pred.bboxes, mpred.faces)
         
-        # check if meta results do not solely consist of 'None' values, if no do additional data processing
-        if not all([x is None for x in meta]):            
-            #recalculate max, min, etc. in meta
-            ages = [face.age for face in filter(None, meta)]
-            median_age = np.average(ages)
-            max_age = max(ages)
-            min_age = min(ages)
-            genders = [face.gender.Woman for face in filter(None, meta)]        
-            median_gender = np.average(genders)
-            max_gender = max(genders)
-            min_gender = min(genders)
-            total_faces = len(meta)
-            #     topbottom_rank: int = 0
-            # leftright_rank: int = 0
-            # area_rank: int = 0
+        # check if we have match classes (and thus not a face model is being used)
+        # todo optimize so deepface is not even run when not using a face yolo model
+        if "face" in args.ad_model:        
+            # match face bboxes from pred to mpred
+            meta = self.match_and_filter(pred.bboxes, mpred.faces)
+                
+            # check if meta results do not solely consist of 'None' values, if no do additional data processing
+            if not all([x is None for x in meta]):            
+                #recalculate max, min, etc. in meta
+                ages = [face.age for face in filter(None, meta)]
+                median_age = np.average(ages)
+                max_age = max(ages)
+                min_age = min(ages)
+                genders = [face.gender.Woman for face in filter(None, meta)]        
+                median_gender = np.average(genders)
+                max_gender = max(genders)
+                min_gender = min(genders)
+                total_faces = len(meta)
+        else:
+            median_age = 0
+            max_age = 0
+            min_age = 0
+            median_gender = 0
+            max_gender = 0
+            min_gender = 0
+            # populate meta from pred
+            meta = [None] * len(pred.bboxes)            
+            total_faces = len(meta)            
             
-            # calculate areas of faces from bboxes, and create a list of int ranks from 0 to total_faces
-            areas = [(bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) for bbox in pred.bboxes]
-            # sort areas and create a list of ranks
-            area_ranks = [0] * total_faces
-            for idx, area in enumerate(sorted(areas, reverse=True)):
-                area_ranks[areas.index(area)] = idx
-            # sort by y coordinate and create a list of ranks
-            topbottom_ranks = [0] * total_faces
-            for idx, bbox in enumerate(sorted(pred.bboxes, key=lambda x: x[1])):
-                topbottom_ranks[pred.bboxes.index(bbox)] = idx
-            # sort by x coordinate and create a list of ranks
-            leftright_ranks = [0] * total_faces
-            for idx, bbox in enumerate(sorted(pred.bboxes, key=lambda x: x[0])):
-                leftright_ranks[pred.bboxes.index(bbox)] = idx
             
-            # write back to meta
-            for idx, face in enumerate(meta):
-                if face is not None:
-                    # set props
-                    face.median_age=median_age
-                    face.median_gender=median_gender
-                    face.max_age=max_age
-                    face.min_age=min_age
-                    face.max_gender=max_gender
-                    face.min_gender=min_gender
-                    face.total_faces=total_faces
-                    face.topbottom_rank=topbottom_ranks[idx]
-                    face.leftright_rank=leftright_ranks[idx]
-                    face.area_rank=area_ranks[idx]
-                    face.ad_confidence = pred.confidences[idx][0]
-                    meta[idx] = face      
+        # calculate areas of faces from bboxes, and create a list of int ranks from 0 to total_faces
+        areas = [(bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) for bbox in pred.bboxes]
+        # sort areas and create a list of ranks
+        area_ranks = [0] * total_faces
+        for idx, area in enumerate(sorted(areas, reverse=True)):
+            area_ranks[areas.index(area)] = idx
+        # sort by y coordinate and create a list of ranks
+        topbottom_ranks = [0] * total_faces
+        for idx, bbox in enumerate(sorted(pred.bboxes, key=lambda x: x[1])):
+            topbottom_ranks[pred.bboxes.index(bbox)] = idx
+        # sort by x coordinate and create a list of ranks
+        leftright_ranks = [0] * total_faces
+        for idx, bbox in enumerate(sorted(pred.bboxes, key=lambda x: x[0])):
+            leftright_ranks[pred.bboxes.index(bbox)] = idx
+            
+        # write back to meta
+        for idx, face in enumerate(meta):
+            if face is not None:
+                # we have actual faces from deepface
+                face.median_age=median_age
+                face.median_gender=median_gender
+                face.max_age=max_age
+                face.min_age=min_age
+                face.max_gender=max_gender
+                face.min_gender=min_gender
+                face.total_faces=total_faces
+                face.topbottom_rank=topbottom_ranks[idx]
+                face.leftright_rank=leftright_ranks[idx]
+                face.area_rank=area_ranks[idx]
+                face.ad_confidence = pred.confidences[idx]
+                face.ad_classname = pred.classnames[idx]
+                meta[idx] = face
+            elif face is None:
+                # we have no faces, only include yolo data
+                face = FaceData()
+                # populate region of face from original pred bbox (convert to Region)
+                face.region = Region(pred.bboxes[idx][0], pred.bboxes[idx][1], pred.bboxes[idx][2], pred.bboxes[idx][3], None, None)
+                face.topbottom_rank=topbottom_ranks[idx]
+                face.leftright_rank=leftright_ranks[idx]
+                face.area_rank=area_ranks[idx]
+                face.ad_confidence = pred.confidences[idx]
+                face.ad_classname = pred.classnames[idx]
+                meta[idx] = face      
         
         # process masks
         masks = mask_preprocess(
@@ -754,7 +779,7 @@ class AfterDetailerScript(scripts.Script):
         if is_img2img_inpaint(p) and not is_inpaint_only_masked(p):
             image_mask = self.get_image_mask(p)
             masks = self.inpaint_mask_filter(image_mask, masks)
-        return masks, meta
+        return masks, meta, pred
 
     @staticmethod
     def i2i_prompts_replace(
@@ -1030,6 +1055,8 @@ class AfterDetailerScript(scripts.Script):
         ad_prompts, ad_negatives, ad_prompt_conditions, ad_neg_prompt_conditions = self.get_prompt(p, args)
         
         # print all prompts and conditions for debugging
+        print(f"[-] ADetailer QUERY MODE DEBUG //////////////////////////////////////////////////// start postprocess inner:")
+        print(args)
         print(f"[-] ADetailer: {ad_prompts} {ad_negatives} {ad_prompt_conditions} {ad_neg_prompt_conditions}")
 
         is_mediapipe = args.is_mediapipe()
@@ -1058,9 +1085,9 @@ class AfterDetailerScript(scripts.Script):
         
         mpred = metadata_predict(pp.image)
 
-        print(f"[-] ADetailer: {len(mpred.faces)} faces detected on image via deepface metadata")
+        print(f"[-] ADetailer: {len(mpred.faces)} faces detected on image via deepface metadata")    
         
-        masks, meta = self.pred_preprocessing(p, pred, mpred, args)
+        masks, meta, predAfterPre = self.pred_preprocessing(p, pred, mpred, args)
         shared.state.assign_current_image(pred.preview)
 
         self.save_image(

@@ -57,8 +57,10 @@ def install():
         ("ultralytics", "8.3.0", None),
         ("mediapipe", "0.10.13", "0.10.15"),
         ("rich", "13.0.0", None),
-        ("tensorflow", "2.8.0", "2.8.0"),
-        ("deepface", "0.0.90", None),
+        ("protobuf", "3.20.2", "3.20.2"),
+        ("tensorflow", "2.9.0", "2.9.1"),
+        ("tf-keras", "2.14.1", "2.14.1"),
+        ("deepface", "0.0.92", None),
     ]
 
     pkgs = []
